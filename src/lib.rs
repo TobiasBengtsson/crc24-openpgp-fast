@@ -1,0 +1,180 @@
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+#[cfg(target_arch = "x86")]
+use std::arch::x86::*;
+
+#[allow(overflowing_literals)]
+unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
+    // Based on the paper Fast CRC Computation for Generic Polynomials Using
+    // PCLMULQDQ Instruction by Intel.
+    // We use the techique outlined for CRC-16, but with x^8 as the multiplier.
+
+    // TODO: remove cloning
+    let octets = &mut bin.clone();
+    const Q_X: i64 = 0x1864CFB00; // P(x) * x^8
+    const U: i64 = 0x1F845FE24;
+
+    const K1: i64 = 0x1F428700; // T = 128 * 4 + 64
+    const K2: i64 = 0x467D2400; // T = 128 * 4
+    const K3: i64 = 0x2C8C9D00; // T = 128 + 64
+    const K4: i64 = 0x64E4D700; // T = 128
+    const K5: i64 = 0xFD7E0C00; // T = 96
+    const K6: i64 = 0xD9FE8C00; // T = 64
+
+    if octets.len() < 128 {
+        return hash_fallback(octets);
+    }
+
+    let shuf_mask = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+
+    // TODO: should be slightly faster to load from 128-bit aligned memory, try and benchmark
+    let mut x3 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+    let mut x2 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+    let mut x1 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+    let mut x0 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+
+    // TODO: we do the shuffling here to not stall the pipeline. If we make a fn to load
+    // and shuffle 128 bits at a time, will the compiler figure out how to inline and optimize
+    // it like this?
+    x3 = _mm_shuffle_epi8(x3, shuf_mask);
+    x2 = _mm_shuffle_epi8(x2, shuf_mask);
+    x1 = _mm_shuffle_epi8(x1, shuf_mask);
+    x0 = _mm_shuffle_epi8(x0, shuf_mask);
+
+    x3 = _mm_xor_si128(x3, _mm_set_epi32(0xB704CE00i32, 0, 0, 0));
+
+    let k1k2 = _mm_set_epi64x(K2, K1);
+    while octets.len() >= 128 {
+        (x3, x2, x1, x0) = fold_by_4(x3, x2, x1, x0, k1k2, shuf_mask, octets);
+    }
+
+    let k3k4 = _mm_set_epi64x(K4, K3);
+    let mut x = reduce128(x3, x2, k3k4);
+    x = reduce128(x, x1, k3k4);
+    x = reduce128(x, x0, k3k4);
+
+    while octets.len() >= 32 {
+        let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+        *octets = &octets[16..];
+        let y = _mm_shuffle_epi8(y, shuf_mask);
+        x = reduce128(x, y, k3k4);
+    }
+
+    if octets.len() > 16 {
+        // Pad data with zero to 256 bits, apply final reduce
+        let pad = 32 - octets.len() as i32;
+        let padded = _mm_srli_si128::<123>(_mm_loadu_si128(octets.as_ptr() as *const __m128i));
+    }
+
+    let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+    let y = _mm_shuffle_epi8(y, shuf_mask);
+    x = reduce128(x, y, k3k4);
+
+    let k5k6 = _mm_set_epi64x(K6, K5);
+    // Apply 128 -> 64 bit reduce
+    let k5mul = _mm_clmulepi64_si128(x, k5k6, 0x01);
+
+    let x = _mm_and_si128(
+        _mm_xor_si128(_mm_slli_si128::<4>(x), k5mul),
+        _mm_set_epi32(0, !0, !0, !0),
+    );
+
+    let k6mul = _mm_clmulepi64_si128(x, k5k6, 0x11);
+    let x = _mm_and_si128(_mm_xor_si128(x, k6mul), _mm_set_epi32(0, 0, !0, !0));
+
+    let pu = _mm_set_epi64x(U, Q_X);
+    let t1 = _mm_clmulepi64_si128(_mm_srli_si128::<4>(x), pu, 0x10);
+    let t2 = _mm_clmulepi64_si128(_mm_srli_si128::<4>(t1), pu, 0x00);
+
+    let x = _mm_xor_si128(x, t2);
+    let c = _mm_extract_epi32(x, 0) as u32;
+
+    println!("{:x}", c);
+    c >> 8
+}
+
+unsafe fn fold_by_4(
+    x3: __m128i,
+    x2: __m128i,
+    x1: __m128i,
+    x0: __m128i,
+    k1k2: __m128i,
+    shuf_mask: __m128i,
+    octets: &mut &[u8],
+) -> (__m128i, __m128i, __m128i, __m128i) {
+    let y3 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+    let y2 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+    let y1 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+    let y0 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+    *octets = &octets[16..];
+
+    let y3 = _mm_shuffle_epi8(y3, shuf_mask);
+    let y2 = _mm_shuffle_epi8(y2, shuf_mask);
+    let y1 = _mm_shuffle_epi8(y1, shuf_mask);
+    let y0 = _mm_shuffle_epi8(y0, shuf_mask);
+
+    let x3 = reduce128(x3, y3, k1k2);
+    let x2 = reduce128(x2, y2, k1k2);
+    let x1 = reduce128(x1, y1, k1k2);
+    let x0 = reduce128(x0, y0, k1k2);
+    (x3, x2, x1, x0)
+}
+
+unsafe fn debug(s: &str, a: __m128i) -> __m128i {
+    if true {
+        union A {
+            a: __m128i,
+            b: [u8; 16],
+        }
+        let x = A { a }.b;
+        print!(" {:20} | ", s);
+        for x in x.iter().rev() {
+            print!("{:02x} ", x);
+        }
+        println!();
+    }
+    return a;
+}
+
+unsafe fn reduce128(a: __m128i, b: __m128i, keys: __m128i) -> __m128i {
+    let t1 = _mm_clmulepi64_si128(a, keys, 0x01);
+    let t2 = _mm_clmulepi64_si128(a, keys, 0x10);
+    _mm_xor_si128(_mm_xor_si128(b, t1), t2)
+}
+
+fn hash_fallback(octets: &[u8]) -> u32 {
+    crc24::hash_raw(octets)
+}
+
+pub fn hash_raw(octets: &[u8]) -> u32 {
+    if is_x86_feature_detected!("pclmulqdq")
+        && is_x86_feature_detected!("sse2")
+        && is_x86_feature_detected!("sse4.1")
+    {
+        unsafe {
+            return hash_pclmulqdq(octets);
+        }
+    }
+
+    hash_fallback(octets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let result = hash_raw(b"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Lorem ipsum dolor sit amet, consectetur adipiscing aaaaaaaaaaaaaaa");
+        assert_eq!(result, 0xE8DDBB);
+    }
+}
