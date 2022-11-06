@@ -65,10 +65,23 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
         x = reduce128(x, y, k3k4);
     }
 
+    debug("mem", _mm_shuffle_epi8(_mm_loadu_si128(octets.as_ptr() as *const __m128i), shuf_mask));
+
     if octets.len() > 16 {
         // Pad data with zero to 256 bits, apply final reduce
         let pad = 32 - octets.len() as i32;
-        let padded = _mm_srli_si128::<123>(_mm_loadu_si128(octets.as_ptr() as *const __m128i));
+        let y = _mm_loadu_si128(octets.as_ptr().offset(-pad as isize) as *const __m128i);
+        *octets = &octets[(16 - pad as usize)..];
+        let y = _mm_shuffle_epi8(y, shuf_mask);
+        debug("y after shuffle", y);
+        let y_mask = _mm_set_epi64x(
+            (if pad >= 8 { 0 } else { !0 as u64 >> (pad * 8) }) as i64,
+            (if pad <= 8 { !0 } else { !0 as u64 >> ((pad - 8) * 8) }) as i64,
+        );
+        debug("y_mask", y_mask);
+        let y = _mm_and_si128(y, y_mask);
+        debug("y", y);
+        x = reduce128(x, y, k3k4);
     }
 
     let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
@@ -177,4 +190,21 @@ mod tests {
         let result = hash_raw(b"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Lorem ipsum dolor sit amet, consectetur adipiscing aaaaaaaaaaaaaaa");
         assert_eq!(result, 0xE8DDBB);
     }
+
+    #[test]
+    pub fn test_128_bytes() {
+        let raw = b"12345678".repeat(16);
+        let expected_result = hash_fallback(&raw);
+        let result = hash_raw(&raw);
+        assert_eq!(result, expected_result);
+    }
+
+    #[test]
+    pub fn test_2187_bytes() {
+        // Large enough to fold multiple times, will need padding
+        let raw = b"abc123)(#".repeat(243);
+        let expected_result = hash_fallback(&raw);
+        let result = hash_raw(&raw);
+        assert_eq!(result, expected_result);
+   }
 }
