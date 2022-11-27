@@ -58,36 +58,29 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
     x = reduce128(x, x1, k3k4);
     x = reduce128(x, x0, k3k4);
 
-    while octets.len() >= 32 {
+    while octets.len() >= 16 {
         let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
         *octets = &octets[16..];
         let y = _mm_shuffle_epi8(y, shuf_mask);
         x = reduce128(x, y, k3k4);
     }
 
-    debug("mem", _mm_shuffle_epi8(_mm_loadu_si128(octets.as_ptr() as *const __m128i), shuf_mask));
-
-    if octets.len() > 16 {
+    if octets.len() > 0 {
         // Pad data with zero to 256 bits, apply final reduce
-        let pad = 32 - octets.len() as i32;
-        let y = _mm_loadu_si128(octets.as_ptr().offset(-pad as isize) as *const __m128i);
-        *octets = &octets[(16 - pad as usize)..];
+        let pad = 16 - octets.len() as i32;
+        let pad_usize = pad as usize;
+        let mut bfr: [u8; 32] = [0; 32];
+
+        // TODO: the back-and forth shuffling of x shouldn't be necessary
+        x = _mm_shuffle_epi8(x, shuf_mask);
+        _mm_storeu_si128(bfr[pad_usize..].as_ptr() as *mut __m128i, x);
+        bfr[16+pad_usize..].copy_from_slice(&octets);
+        x = _mm_loadu_si128(bfr.as_ptr() as *const __m128i);
+        x = _mm_shuffle_epi8(x, shuf_mask);
+        let y = _mm_loadu_si128(bfr[16..].as_ptr() as *const __m128i);
         let y = _mm_shuffle_epi8(y, shuf_mask);
-        debug("y after shuffle", y);
-        let y_mask = _mm_set_epi64x(
-            (if pad >= 8 { 0 } else { !0 as u64 >> (pad * 8) }) as i64,
-            (if pad <= 8 { !0 } else { !0 as u64 >> ((pad - 8) * 8) }) as i64,
-        );
-        debug("y_mask", y_mask);
-        let y = _mm_and_si128(y, y_mask);
-        debug("y", y);
         x = reduce128(x, y, k3k4);
     }
-
-    let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
-    *octets = &octets[16..];
-    let y = _mm_shuffle_epi8(y, shuf_mask);
-    x = reduce128(x, y, k3k4);
 
     let k5k6 = _mm_set_epi64x(K6, K5);
     // Apply 128 -> 64 bit reduce
@@ -142,22 +135,6 @@ unsafe fn fold_by_4(
     (x3, x2, x1, x0)
 }
 
-unsafe fn debug(s: &str, a: __m128i) -> __m128i {
-    if true {
-        union A {
-            a: __m128i,
-            b: [u8; 16],
-        }
-        let x = A { a }.b;
-        print!(" {:20} | ", s);
-        for x in x.iter().rev() {
-            print!("{:02x} ", x);
-        }
-        println!();
-    }
-    return a;
-}
-
 unsafe fn reduce128(a: __m128i, b: __m128i, keys: __m128i) -> __m128i {
     let t1 = _mm_clmulepi64_si128(a, keys, 0x01);
     let t2 = _mm_clmulepi64_si128(a, keys, 0x10);
@@ -186,9 +163,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
+    pub fn test_lorem() {
+        // Lorem ipsum padded to 128-bits
+        let result = hash_raw(b"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Lorem ipsum dolor sit amet, consectetur adipiscing");
+        assert_eq!(result, 0x470B16);
+    }
+
+    #[test]
+    pub fn test_lorem_aligned() {
+        // Lorem ipsum padded to 128-bits
         let result = hash_raw(b"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. Lorem ipsum dolor sit amet, consectetur adipiscing aaaaaaaaaaaaaaa");
         assert_eq!(result, 0xE8DDBB);
+    }
+
+    #[test]
+    pub fn test_120_bytes() {
+        // Uses fallback
+        let raw = b"12345678".repeat(15);
+        let expected_result = hash_fallback(&raw);
+        let result = hash_raw(&raw);
+        assert_eq!(result, expected_result);
     }
 
     #[test]
@@ -203,6 +197,23 @@ mod tests {
     pub fn test_2187_bytes() {
         // Large enough to fold multiple times, will need padding
         let raw = b"abc123)(#".repeat(243);
+        let expected_result = hash_fallback(&raw);
+        let result = hash_raw(&raw);
+        assert_eq!(result, expected_result);
+   }
+
+    #[test]
+    pub fn test_80056_bytes() {
+        // Random "larger" number
+        let raw = b"1jn5?`=Z".repeat(10007);
+        let expected_result = hash_fallback(&raw);
+        let result = hash_raw(&raw);
+        assert_eq!(result, expected_result);
+   }
+
+    #[test]
+    pub fn test_zero_data() {
+        let raw = [0; 10007];
         let expected_result = hash_fallback(&raw);
         let result = hash_raw(&raw);
         assert_eq!(result, expected_result);
