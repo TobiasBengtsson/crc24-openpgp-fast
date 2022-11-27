@@ -10,8 +10,7 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
     // PCLMULQDQ Instruction by Intel.
     // We use the techique outlined for CRC-16, but with x^8 as the multiplier.
 
-    // TODO: remove cloning
-    let octets = &mut bin.clone();
+    let mut octets = bin;
     const Q_X: i64 = 0x1864CFB00; // P(x) * x^8
     const U: i64 = 0x1F845FE24;
 
@@ -30,13 +29,13 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
 
     // TODO: should be slightly faster to load from 128-bit aligned memory, try and benchmark
     let mut x3 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
-    *octets = &octets[16..];
+    octets = &octets[16..];
     let mut x2 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
-    *octets = &octets[16..];
+    octets = &octets[16..];
     let mut x1 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
-    *octets = &octets[16..];
+    octets = &octets[16..];
     let mut x0 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
-    *octets = &octets[16..];
+    octets = &octets[16..];
 
     // TODO: we do the shuffling here to not stall the pipeline. If we make a fn to load
     // and shuffle 128 bits at a time, will the compiler figure out how to inline and optimize
@@ -50,7 +49,7 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
 
     let k1k2 = _mm_set_epi64x(K2, K1);
     while octets.len() >= 128 {
-        (x3, x2, x1, x0) = fold_by_4(x3, x2, x1, x0, k1k2, shuf_mask, octets);
+        (x3, x2, x1, x0) = fold_by_4(x3, x2, x1, x0, k1k2, shuf_mask, &mut octets);
     }
 
     let k3k4 = _mm_set_epi64x(K4, K3);
@@ -60,7 +59,7 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
 
     while octets.len() >= 16 {
         let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
-        *octets = &octets[16..];
+        octets = &octets[16..];
         let y = _mm_shuffle_epi8(y, shuf_mask);
         x = reduce128(x, y, k3k4);
     }
