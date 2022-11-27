@@ -101,7 +101,6 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
     let x = _mm_xor_si128(x, t2);
     let c = _mm_extract_epi32(x, 0) as u32;
 
-    println!("{:x}", c);
     c >> 8
 }
 
