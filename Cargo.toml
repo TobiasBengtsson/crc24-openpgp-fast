@@ -7,3 +7,10 @@ edition = "2021"
 
 [dependencies]
 crc24 = "0.1.6"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "fast_vs_fallback"
+harness = false
