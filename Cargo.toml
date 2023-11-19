@@ -11,7 +11,7 @@ edition = "2021"
 crc24 = "0.1.6"
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.5"
 
 [[bench]]
 name = "fast_vs_fallback"
