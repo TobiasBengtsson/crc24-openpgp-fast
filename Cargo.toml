@@ -13,6 +13,9 @@ crc24 = "0.1.6"
 [dev-dependencies]
 criterion = "0.5"
 
+[lib]
+bench = false
+
 [[bench]]
 name = "fast_vs_fallback"
 harness = false
