@@ -5,6 +5,8 @@ use std::arch::x86_64::*;
 use std::arch::x86::*;
 
 #[allow(overflowing_literals)]
+#[target_feature(enable = "pclmulqdq")]
+#[target_feature(enable = "sse4.1")]
 unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
     // Based on the paper Fast CRC Computation for Generic Polynomials Using
     // PCLMULQDQ Instruction by Intel.
@@ -145,7 +147,6 @@ fn hash_fallback(octets: &[u8]) -> u32 {
 
 pub fn hash_raw(octets: &[u8]) -> u32 {
     if is_x86_feature_detected!("pclmulqdq")
-        && is_x86_feature_detected!("sse2")
         && is_x86_feature_detected!("sse4.1")
     {
         unsafe {

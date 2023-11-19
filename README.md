@@ -6,7 +6,7 @@ SIMD implementation of the CRC24 checksum as used in OpenPGP, for the x86-64 arc
 
 x86-64 with the following extensions:
 - pclmulqdq
-- sse2
+- sse2 (implied by sse4.1)
 - sse4.1
 
 NOTE: Will fallback to a non-SIMD implementation if CPU features are not present, so don't worry about using this library for code that potentially goes into non-compatible CPUs.
