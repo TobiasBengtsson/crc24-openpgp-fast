@@ -151,12 +151,14 @@ unsafe fn hash_vpclmulqdq(bin: &[u8]) -> u32 {
     const U: i64 = 0x1F845FE24;
 
     // see https://stackoverflow.com/questions/21171733/calculating-constants-for-crc32-using-pclmulqdq
-    const K1: i64 = 0x8A322000; // T = 128 * 8 + 64
-    const K2: i64 = 0x2E6A9100; // T = 128 * 8
-    const K3: i64 = 0x2C8C9D00; // T = 128 + 64
-    const K4: i64 = 0x64E4D700; // T = 128
-    const K5: i64 = 0xFD7E0C00; // T = 96
-    const K6: i64 = 0xD9FE8C00; // T = 64
+    const K1: i64 = 0x8A322000; // T = 256 * 4 + 64
+    const K2: i64 = 0x2E6A9100; // T = 256 * 4
+    const K3: i64 = 0x66DD1F00; // T = 256 + 64
+    const K4: i64 = 0x9D89A200; // T = 256
+    const K5: i64 = 0x2C8C9D00; // T = 128 + 64
+    const K6: i64 = 0x64E4D700; // T = 128
+    const K7: i64 = 0xFD7E0C00; // T = 96
+    const K8: i64 = 0xD9FE8C00; // T = 64
 
     if octets.len() < 256 {
         return hash_pclmulqdq(octets);
@@ -186,29 +188,22 @@ unsafe fn hash_vpclmulqdq(bin: &[u8]) -> u32 {
         (x3, x2, x1, x0) = fold_by_4_256(x3, x2, x1, x0, k1k2, shuf_mask, &mut octets);
     }
 
-    let k3k4 = _mm_set_epi64x(K4, K3);
+    let k3k4 = _mm256_set_epi64x(K4, K3, K4, K3);
+    let mut x = reduce256(x3, x2, k3k4);
+    x = reduce256(x, x1, k3k4);
+    x = reduce256(x, x0, k3k4);
+    let x1 = _mm256_castsi256_si128(x);
+    let x0 = _mm256_extracti128_si256(x, 0x01);
+    let k5k6 = _mm_set_epi64x(K6, K5);
+    let mut x = reduce128(x1, x0, k5k6);
+
     let shuf_mask = _mm256_castsi256_si128(shuf_mask);
-    let x7 = _mm256_castsi256_si128(x3);
-    let x6 = _mm256_extracti128_si256(x3, 0x01);
-    let x5 = _mm256_castsi256_si128(x2);
-    let x4 = _mm256_extracti128_si256(x2, 0x01);
-    let x3 = _mm256_castsi256_si128(x1);
-    let x2 = _mm256_extracti128_si256(x1, 0x01);
-    let x1 = _mm256_castsi256_si128(x0);
-    let x0 = _mm256_extracti128_si256(x0, 0x01);
-    let mut x = reduce128(x7, x6, k3k4);
-    x = reduce128(x, x5, k3k4);
-    x = reduce128(x, x4, k3k4);
-    x = reduce128(x, x3, k3k4);
-    x = reduce128(x, x2, k3k4);
-    x = reduce128(x, x1, k3k4);
-    x = reduce128(x, x0, k3k4);
 
     while octets.len() >= 16 {
         let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
         octets = &octets[16..];
         let y = _mm_shuffle_epi8(y, shuf_mask);
-        x = reduce128(x, y, k3k4);
+        x = reduce128(x, y, k5k6);
     }
 
     if octets.len() > 0 {
@@ -225,19 +220,19 @@ unsafe fn hash_vpclmulqdq(bin: &[u8]) -> u32 {
         x = _mm_shuffle_epi8(x, shuf_mask);
         let y = _mm_loadu_si128(bfr[16..].as_ptr() as *const __m128i);
         let y = _mm_shuffle_epi8(y, shuf_mask);
-        x = reduce128(x, y, k3k4);
+        x = reduce128(x, y, k5k6);
     }
 
-    let k5k6 = _mm_set_epi64x(K6, K5);
+    let k7k8 = _mm_set_epi64x(K8, K7);
     // Apply 128 -> 64 bit reduce
-    let k5mul = _mm_clmulepi64_si128(x, k5k6, 0x01);
+    let k7mul = _mm_clmulepi64_si128(x, k7k8, 0x01);
 
     let x = _mm_and_si128(
-        _mm_xor_si128(_mm_slli_si128::<4>(x), k5mul),
+        _mm_xor_si128(_mm_slli_si128::<4>(x), k7mul),
         _mm_set_epi32(0, !0, !0, !0),
     );
 
-    let k6mul = _mm_clmulepi64_si128(x, k5k6, 0x11);
+    let k6mul = _mm_clmulepi64_si128(x, k7k8, 0x11);
     let x = _mm_and_si128(_mm_xor_si128(x, k6mul), _mm_set_epi32(0, 0, !0, !0));
 
     let pu = _mm_set_epi64x(U, Q_X);
