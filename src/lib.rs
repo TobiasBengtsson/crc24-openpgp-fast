@@ -1,3 +1,6 @@
+#![feature(avx512_target_feature)]
+#![feature(stdsimd)]
+
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
@@ -8,14 +11,11 @@ use std::arch::x86::*;
 #[target_feature(enable = "pclmulqdq")]
 #[target_feature(enable = "sse4.1")]
 unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
-    // Based on the paper Fast CRC Computation for Generic Polynomials Using
-    // PCLMULQDQ Instruction by Intel.
-    // We use the techique outlined for CRC-16, but with x^8 as the multiplier.
-
     let mut octets = bin;
     const Q_X: i64 = 0x1864CFB00; // P(x) * x^8
     const U: i64 = 0x1F845FE24;
 
+    // see https://stackoverflow.com/questions/21171733/calculating-constants-for-crc32-using-pclmulqdq
     const K1: i64 = 0x1F428700; // T = 128 * 4 + 64
     const K2: i64 = 0x467D2400; // T = 128 * 4
     const K3: i64 = 0x2C8C9D00; // T = 128 + 64
@@ -29,7 +29,6 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
 
     let shuf_mask = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 
-    // TODO: should be slightly faster to load from 128-bit aligned memory, try and benchmark
     let mut x3 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
     octets = &octets[16..];
     let mut x2 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
@@ -39,9 +38,6 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
     let mut x0 = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
     octets = &octets[16..];
 
-    // TODO: we do the shuffling here to not stall the pipeline. If we make a fn to load
-    // and shuffle 128 bits at a time, will the compiler figure out how to inline and optimize
-    // it like this?
     x3 = _mm_shuffle_epi8(x3, shuf_mask);
     x2 = _mm_shuffle_epi8(x2, shuf_mask);
     x1 = _mm_shuffle_epi8(x1, shuf_mask);
@@ -51,7 +47,7 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
 
     let k1k2 = _mm_set_epi64x(K2, K1);
     while octets.len() >= 128 {
-        (x3, x2, x1, x0) = fold_by_4(x3, x2, x1, x0, k1k2, shuf_mask, &mut octets);
+        (x3, x2, x1, x0) = fold_by_4_128(x3, x2, x1, x0, k1k2, shuf_mask, &mut octets);
     }
 
     let k3k4 = _mm_set_epi64x(K4, K3);
@@ -105,7 +101,9 @@ unsafe fn hash_pclmulqdq(bin: &[u8]) -> u32 {
     c >> 8
 }
 
-unsafe fn fold_by_4(
+#[target_feature(enable = "pclmulqdq")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn fold_by_4_128(
     x3: __m128i,
     x2: __m128i,
     x1: __m128i,
@@ -135,10 +133,139 @@ unsafe fn fold_by_4(
     (x3, x2, x1, x0)
 }
 
+#[target_feature(enable = "pclmulqdq")]
+#[target_feature(enable = "sse4.1")]
 unsafe fn reduce128(a: __m128i, b: __m128i, keys: __m128i) -> __m128i {
     let t1 = _mm_clmulepi64_si128(a, keys, 0x01);
     let t2 = _mm_clmulepi64_si128(a, keys, 0x10);
     _mm_xor_si128(_mm_xor_si128(b, t1), t2)
+}
+
+#[allow(overflowing_literals)]
+#[target_feature(enable = "vpclmulqdq")]
+#[target_feature(enable = "avx512vl")]
+#[target_feature(enable = "avx2")]
+unsafe fn hash_vpclmulqdq(bin: &[u8]) -> u32 {
+    let mut octets = bin;
+    const Q_X: i64 = 0x1864CFB00; // P(x) * x^8
+    const U: i64 = 0x1F845FE24;
+
+    // see https://stackoverflow.com/questions/21171733/calculating-constants-for-crc32-using-pclmulqdq
+    const K1: i64 = 0x1F428700; // T = 128 * 4 + 64
+    const K2: i64 = 0x467D2400; // T = 128 * 4
+    const K3: i64 = 0x2C8C9D00; // T = 128 + 64
+    const K4: i64 = 0x64E4D700; // T = 128
+    const K5: i64 = 0xFD7E0C00; // T = 96
+    const K6: i64 = 0xD9FE8C00; // T = 64
+
+    if octets.len() < 128 {
+        return hash_fallback(octets);
+    }
+
+    let shuf_mask = _mm256_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+                                     15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+
+    let mut x1 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    octets = &octets[32..];
+    let mut x0 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    octets = &octets[32..];
+
+    x1 = _mm256_shuffle_epi8(x1, shuf_mask);
+    x0 = _mm256_shuffle_epi8(x0, shuf_mask);
+
+    x1 = _mm256_xor_si256(x1, _mm256_set_epi32(0, 0, 0, 0, 0xB704CE00i32, 0, 0, 0));
+
+    let k1k2 = _mm256_set_epi64x(K2, K1, K2, K1);
+    while octets.len() >= 128 {
+        (x1, x0) = fold_by_2_256(x1, x0, k1k2, shuf_mask, &mut octets);
+    }
+
+    let k3k4 = _mm_set_epi64x(K4, K3);
+    let shuf_mask = _mm256_castsi256_si128(shuf_mask);
+    let x3 = _mm256_castsi256_si128(x1);
+    let x2 = _mm256_extracti128_si256(x1, 0x01);
+    let x1 = _mm256_castsi256_si128(x0);
+    let x0 = _mm256_extracti128_si256(x0, 0x01);
+    let mut x = reduce128(x3, x2, k3k4);
+    x = reduce128(x, x1, k3k4);
+    x = reduce128(x, x0, k3k4);
+
+    while octets.len() >= 16 {
+        let y = _mm_loadu_si128(octets.as_ptr() as *const __m128i);
+        octets = &octets[16..];
+        let y = _mm_shuffle_epi8(y, shuf_mask);
+        x = reduce128(x, y, k3k4);
+    }
+
+    if octets.len() > 0 {
+        // Pad data with zero to 256 bits, apply final reduce
+        let pad = 16 - octets.len() as i32;
+        let pad_usize = pad as usize;
+        let mut bfr: [u8; 32] = [0; 32];
+
+        // TODO: the back-and forth shuffling of x shouldn't be necessary
+        x = _mm_shuffle_epi8(x, shuf_mask);
+        _mm_storeu_si128(bfr[pad_usize..].as_ptr() as *mut __m128i, x);
+        bfr[16+pad_usize..].copy_from_slice(&octets);
+        x = _mm_loadu_si128(bfr.as_ptr() as *const __m128i);
+        x = _mm_shuffle_epi8(x, shuf_mask);
+        let y = _mm_loadu_si128(bfr[16..].as_ptr() as *const __m128i);
+        let y = _mm_shuffle_epi8(y, shuf_mask);
+        x = reduce128(x, y, k3k4);
+    }
+
+    let k5k6 = _mm_set_epi64x(K6, K5);
+    // Apply 128 -> 64 bit reduce
+    let k5mul = _mm_clmulepi64_si128(x, k5k6, 0x01);
+
+    let x = _mm_and_si128(
+        _mm_xor_si128(_mm_slli_si128::<4>(x), k5mul),
+        _mm_set_epi32(0, !0, !0, !0),
+    );
+
+    let k6mul = _mm_clmulepi64_si128(x, k5k6, 0x11);
+    let x = _mm_and_si128(_mm_xor_si128(x, k6mul), _mm_set_epi32(0, 0, !0, !0));
+
+    let pu = _mm_set_epi64x(U, Q_X);
+    let t1 = _mm_clmulepi64_si128(_mm_srli_si128::<4>(x), pu, 0x10);
+    let t2 = _mm_clmulepi64_si128(_mm_srli_si128::<4>(t1), pu, 0x00);
+
+    let x = _mm_xor_si128(x, t2);
+    let c = _mm_extract_epi32(x, 0) as u32;
+
+    c >> 8
+}
+
+#[target_feature(enable = "vpclmulqdq")]
+#[target_feature(enable = "avx512vl")]
+#[target_feature(enable = "avx2")]
+unsafe fn fold_by_2_256(
+    x1: __m256i,
+    x0: __m256i,
+    k1k2: __m256i,
+    shuf_mask: __m256i,
+    octets: &mut &[u8],
+) -> (__m256i, __m256i) {
+    let y1 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    *octets = &octets[32..];
+    let y0 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    *octets = &octets[32..];
+
+    let y1 = _mm256_shuffle_epi8(y1, shuf_mask);
+    let y0 = _mm256_shuffle_epi8(y0, shuf_mask);
+
+    let x1 = reduce256(x1, y1, k1k2);
+    let x0 = reduce256(x0, y0, k1k2);
+    (x1, x0)
+}
+
+#[target_feature(enable = "vpclmulqdq")]
+#[target_feature(enable = "avx512vl")]
+#[target_feature(enable = "avx2")]
+unsafe fn reduce256(a: __m256i, b: __m256i, keys: __m256i) -> __m256i {
+    let t1 = _mm256_clmulepi64_epi128(a, keys, 0x01);
+    let t2 = _mm256_clmulepi64_epi128(a, keys, 0x10);
+    _mm256_xor_si256(_mm256_xor_si256(b, t1), t2)
 }
 
 fn hash_fallback(octets: &[u8]) -> u32 {
@@ -146,6 +273,15 @@ fn hash_fallback(octets: &[u8]) -> u32 {
 }
 
 pub fn hash_raw(octets: &[u8]) -> u32 {
+    if is_x86_feature_detected!("vpclmulqdq")
+        && is_x86_feature_detected!("avx512vl")
+        && is_x86_feature_detected!("avx2")
+    {
+        unsafe {
+            return hash_vpclmulqdq(octets);
+        }
+    }
+
     if is_x86_feature_detected!("pclmulqdq")
         && is_x86_feature_detected!("sse4.1")
     {
