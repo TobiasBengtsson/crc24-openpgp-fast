@@ -151,42 +151,56 @@ unsafe fn hash_vpclmulqdq(bin: &[u8]) -> u32 {
     const U: i64 = 0x1F845FE24;
 
     // see https://stackoverflow.com/questions/21171733/calculating-constants-for-crc32-using-pclmulqdq
-    const K1: i64 = 0x1F428700; // T = 128 * 4 + 64
-    const K2: i64 = 0x467D2400; // T = 128 * 4
+    const K1: i64 = 0x8A322000; // T = 128 * 8 + 64
+    const K2: i64 = 0x2E6A9100; // T = 128 * 8
     const K3: i64 = 0x2C8C9D00; // T = 128 + 64
     const K4: i64 = 0x64E4D700; // T = 128
     const K5: i64 = 0xFD7E0C00; // T = 96
     const K6: i64 = 0xD9FE8C00; // T = 64
 
-    if octets.len() < 128 {
-        return hash_fallback(octets);
+    if octets.len() < 256 {
+        return hash_pclmulqdq(octets);
     }
 
     let shuf_mask = _mm256_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
                                      15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 
+    let mut x3 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    octets = &octets[32..];
+    let mut x2 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    octets = &octets[32..];
     let mut x1 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
     octets = &octets[32..];
     let mut x0 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
     octets = &octets[32..];
 
+    x3 = _mm256_shuffle_epi8(x3, shuf_mask);
+    x2 = _mm256_shuffle_epi8(x2, shuf_mask);
     x1 = _mm256_shuffle_epi8(x1, shuf_mask);
     x0 = _mm256_shuffle_epi8(x0, shuf_mask);
 
-    x1 = _mm256_xor_si256(x1, _mm256_set_epi32(0, 0, 0, 0, 0xB704CE00i32, 0, 0, 0));
+    x3 = _mm256_xor_si256(x3, _mm256_set_epi32(0, 0, 0, 0, 0xB704CE00i32, 0, 0, 0));
 
     let k1k2 = _mm256_set_epi64x(K2, K1, K2, K1);
-    while octets.len() >= 128 {
-        (x1, x0) = fold_by_2_256(x1, x0, k1k2, shuf_mask, &mut octets);
+    while octets.len() >= 256 {
+        (x3, x2, x1, x0) = fold_by_4_256(x3, x2, x1, x0, k1k2, shuf_mask, &mut octets);
     }
 
     let k3k4 = _mm_set_epi64x(K4, K3);
     let shuf_mask = _mm256_castsi256_si128(shuf_mask);
+    let x7 = _mm256_castsi256_si128(x3);
+    let x6 = _mm256_extracti128_si256(x3, 0x01);
+    let x5 = _mm256_castsi256_si128(x2);
+    let x4 = _mm256_extracti128_si256(x2, 0x01);
     let x3 = _mm256_castsi256_si128(x1);
     let x2 = _mm256_extracti128_si256(x1, 0x01);
     let x1 = _mm256_castsi256_si128(x0);
     let x0 = _mm256_extracti128_si256(x0, 0x01);
-    let mut x = reduce128(x3, x2, k3k4);
+    let mut x = reduce128(x7, x6, k3k4);
+    x = reduce128(x, x5, k3k4);
+    x = reduce128(x, x4, k3k4);
+    x = reduce128(x, x3, k3k4);
+    x = reduce128(x, x2, k3k4);
     x = reduce128(x, x1, k3k4);
     x = reduce128(x, x0, k3k4);
 
@@ -239,24 +253,34 @@ unsafe fn hash_vpclmulqdq(bin: &[u8]) -> u32 {
 #[target_feature(enable = "vpclmulqdq")]
 #[target_feature(enable = "avx512vl")]
 #[target_feature(enable = "avx2")]
-unsafe fn fold_by_2_256(
+unsafe fn fold_by_4_256(
+    x3: __m256i,
+    x2: __m256i,
     x1: __m256i,
     x0: __m256i,
     k1k2: __m256i,
     shuf_mask: __m256i,
     octets: &mut &[u8],
-) -> (__m256i, __m256i) {
+) -> (__m256i, __m256i, __m256i, __m256i) {
+    let y3 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    *octets = &octets[32..];
+    let y2 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
+    *octets = &octets[32..];
     let y1 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
     *octets = &octets[32..];
     let y0 = _mm256_loadu_si256(octets.as_ptr() as *const __m256i);
     *octets = &octets[32..];
 
+    let y3 = _mm256_shuffle_epi8(y3, shuf_mask);
+    let y2 = _mm256_shuffle_epi8(y2, shuf_mask);
     let y1 = _mm256_shuffle_epi8(y1, shuf_mask);
     let y0 = _mm256_shuffle_epi8(y0, shuf_mask);
 
+    let x3 = reduce256(x3, y3, k1k2);
+    let x2 = reduce256(x2, y2, k1k2);
     let x1 = reduce256(x1, y1, k1k2);
     let x0 = reduce256(x0, y0, k1k2);
-    (x1, x0)
+    (x3, x2, x1, x0)
 }
 
 #[target_feature(enable = "vpclmulqdq")]
